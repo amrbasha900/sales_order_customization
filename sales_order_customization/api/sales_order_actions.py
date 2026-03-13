@@ -197,6 +197,7 @@ def create_sales_invoice(args):
     for item in items_to_remove:
         si.items.remove(item)
 
+    si.update_stock = 1
     si.set_missing_values()
     si.calculate_taxes_and_totals()
     si.insert(ignore_permissions=False)
@@ -259,6 +260,7 @@ def auto_create_invoice_and_payment(sales_order, payments):
     from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
 
     si = make_sales_invoice(sales_order)
+    si.update_stock = 1
     si.set_missing_values()
     si.calculate_taxes_and_totals()
     si.insert(ignore_permissions=False)
@@ -407,7 +409,7 @@ def create_sales_return(args):
             "sales_invoice": si_name,
         })
 
-        # Recalculate totals
+        return_doc.update_stock = 1
         return_doc.run_method("calculate_taxes_and_totals")
         return_doc.insert(ignore_permissions=False)
 
