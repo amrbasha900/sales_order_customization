@@ -36,9 +36,50 @@ frappe.ui.form.on("Sales Order", {
                         __("Actions")
                     );
                 }
-            },
+            }
         });
+
+        // ── Print Invoice Button ────        // ── Print Invoice Button ────
+        if (frm.doc.status === "To Deliver and Bill" || frm.doc.status === "To Bill" || frm.doc.status === "To Deliver" || frm.doc.status === "Completed") {
+            frm.add_custom_button(
+                __("Print Invoice"),
+                function () {
+                    frappe.call({
+                        method: "sales_order_customization.api.sales_order_actions.get_sales_invoice_print_url",
+                        args: { sales_order: frm.doc.name },
+                        callback: function (r) {
+                            if (r.message && r.message.url) {
+                                window.open(r.message.url, "_blank");
+                            }
+                        }
+                    });
+                },
+                __("Actions")
+            );
+        }
     },
+
+    customer(frm) {
+        if (!frm.doc.customer || !frm.doc.items || !frm.doc.items.length) return;
+
+        // Iterate through all items and update the custom_last_rate for the new customer
+        frm.doc.items.forEach(row => {
+            if (row.item_code) {
+                frappe.call({
+                    method: "sales_order_customization.api.sales_order_actions.get_last_sales_rate",
+                    args: {
+                        customer: frm.doc.customer,
+                        item_code: row.item_code
+                    },
+                    callback: function (r) {
+                        if (r.message !== undefined) {
+                            frappe.model.set_value(row.doctype, row.name, "custom_last_rate", flt(r.message));
+                        }
+                    }
+                });
+            }
+        });
+    }
 });
 
 // ═══════════════════════════════════════════════════════
@@ -60,12 +101,17 @@ function show_submit_and_pay_dialog(frm) {
                 </div>`,
             },
             {
+                fieldname: "create_without_payment",
+                fieldtype: "Check",
+                label: __("Create Invoice without Payment"),
+                default: 0
+            },
+            {
                 fieldname: "payments",
                 fieldtype: "Table",
                 label: __("Payments"),
                 cannot_add_rows: false,
                 in_place_edit: true,
-                reqd: 1,
                 fields: [
                     {
                         fieldname: "mode_of_payment",
@@ -83,7 +129,6 @@ function show_submit_and_pay_dialog(frm) {
                         in_list_view: 1,
                         reqd: 1,
                         columns: 2,
-                        default: grand_total,
                     },
                     {
                         fieldname: "reference_no",
@@ -105,54 +150,70 @@ function show_submit_and_pay_dialog(frm) {
         ],
         primary_action_label: __("Submit & Pay"),
         primary_action(values) {
+            const create_without_payment = !!values.create_without_payment;
             const payments = values.payments || [];
-            if (!payments.length) {
-                frappe.msgprint(__("Please add at least one payment row."));
-                return;
-            }
 
-            let total_payment = 0;
-            for (const [idx, p] of payments.entries()) {
-                if (!p.mode_of_payment) {
-                    frappe.msgprint(__("Row {0}: Mode of Payment is required.", [idx + 1]));
+            if (!create_without_payment) {
+                if (!payments.length) {
+                    frappe.msgprint(__("Please add at least one payment row."));
                     return;
                 }
-                if (flt(p.amount) <= 0) {
-                    frappe.msgprint(__("Row {0}: Amount must be greater than zero.", [idx + 1]));
-                    return;
-                }
-                total_payment += flt(p.amount);
-            }
 
-            if (flt(total_payment, 2) !== flt(grand_total, 2)) {
-                frappe.msgprint(
-                    __("Total payment ({0}) does not match Grand Total ({1}).", [
-                        format_currency(total_payment, frm.doc.currency),
-                        format_currency(grand_total, frm.doc.currency),
-                    ])
-                );
-                return;
+                let total_payment = 0;
+                for (const [idx, p] of payments.entries()) {
+                    if (!p.mode_of_payment) {
+                        frappe.msgprint(__("Row {0}: Mode of Payment is required.", [idx + 1]));
+                        return;
+                    }
+                    if (flt(p.amount) <= 0) {
+                        frappe.msgprint(__("Row {0}: Amount must be greater than zero.", [idx + 1]));
+                        return;
+                    }
+                    total_payment += flt(p.amount);
+                }
+
+                if (create_without_payment) {
+                    if (flt(total_payment, 2) > flt(grand_total, 2)) {
+                        frappe.msgprint(
+                            __("Total payment ({0}) cannot exceed Grand Total ({1}).", [
+                                format_currency(total_payment, frm.doc.currency),
+                                format_currency(grand_total, frm.doc.currency),
+                            ])
+                        );
+                        return;
+                    }
+                } else {
+                    if (flt(total_payment, 2) !== flt(grand_total, 2)) {
+                        frappe.msgprint(
+                            __("Total payment ({0}) must match Grand Total ({1}).", [
+                                format_currency(total_payment, frm.doc.currency),
+                                format_currency(grand_total, frm.doc.currency),
+                            ])
+                        );
+                        return;
+                    }
+                }
             }
 
             d.hide();
 
-            // Step 1: Submit the Sales Order using standard frappe.xcall
-            frappe.xcall("frappe.client.submit", { doc: frm.doc })
-                .then(() => {
-                    // Step 2: Create Invoice + Payment Entries
-                    return frappe.xcall(
-                        "sales_order_customization.api.sales_order_actions.auto_create_invoice_and_payment",
-                        {
-                            sales_order: frm.doc.name,
-                            payments: payments.map((p) => ({
-                                mode_of_payment: p.mode_of_payment,
-                                amount: flt(p.amount),
-                                reference_no: p.reference_no || "",
-                                reference_date: p.reference_date || "",
-                            })),
-                        }
-                    );
-                })
+            // Step 1: Save if dirty, then create Invoice + (Optionally) Payment Entries
+            // (The backend now handles SO submission atomically)
+            (frm.is_dirty() ? frm.save() : Promise.resolve()).then(() => {
+                return frappe.xcall(
+                    "sales_order_customization.api.sales_order_actions.auto_create_invoice_and_payment",
+                    {
+                        sales_order: frm.doc.name,
+                        create_without_payment: create_without_payment ? 1 : 0,
+                        payments: payments.map((p) => ({
+                            mode_of_payment: p.mode_of_payment,
+                            amount: flt(p.amount),
+                            reference_no: p.reference_no || "",
+                            reference_date: p.reference_date || "",
+                        })),
+                    }
+                );
+            })
                 .then((result) => {
                     let msg = __("Sales Invoice {0} created and submitted.", [
                         `<a href="/app/sales-invoice/${result.sales_invoice}">${result.sales_invoice}</a>`,
@@ -175,6 +236,41 @@ function show_submit_and_pay_dialog(frm) {
                 });
         },
     });
+
+    // Auto-calculate remaining amount when adding a new row
+    const original_add_new_row = d.fields_dict.payments.grid.add_new_row.bind(
+        d.fields_dict.payments.grid
+    );
+    console.log(d.fields_dict.payments.grid);
+
+    d.fields_dict.payments.grid.add_new_row = function (...args) {
+        const result = original_add_new_row(...args);
+
+        const grid = d.fields_dict.payments.grid;
+        const data = grid.get_data() || [];
+        if (!data.length) return result;
+
+        const last_row = data[data.length - 1];
+        if (!last_row) return result;
+
+        // Sum all rows except the last one
+        let already_filled = 0;
+        data.forEach((row, i) => {
+            if (i < data.length - 1) {
+                already_filled += flt(row.amount || 0);
+            }
+        });
+
+        const remaining = flt(grand_total) - already_filled;
+
+        // Set directly on the row object — no doctype needed
+        last_row.amount = remaining > 0 ? remaining : 0;
+
+        // Refresh the entire grid so the cell renders the new value
+        grid.refresh();
+
+        return result;
+    };
 
     d.show();
 }
@@ -624,7 +720,7 @@ function load_warehouse_stock(frm, item_code, $wrapper) {
             item_code: item_code,
             company: frm.doc.company
         },
-        callback: function(r) {
+        callback: function (r) {
             $wrapper.empty();
             let data = r.message || [];
             if (!data.length) {
@@ -659,7 +755,7 @@ function load_warehouse_stock(frm, item_code, $wrapper) {
 function load_sales_history(item_code, $wrapper, currency) {
     let start = 0;
     const limit = 5;
-    
+
     $wrapper.html(`
         <table class="table table-bordered table-hover sales-table">
             <thead>
@@ -689,7 +785,7 @@ function load_sales_history(item_code, $wrapper, currency) {
         frappe.call({
             method: "sales_order_customization.api.sales_order_actions.get_item_sales_history",
             args: { item_code: item_code, start: start, limit: limit },
-            callback: function(r) {
+            callback: function (r) {
                 let data = r.message || [];
                 render_history_rows(data, $tbody, 'sales', currency);
                 if (data.length === limit) {
@@ -712,7 +808,7 @@ function load_sales_history(item_code, $wrapper, currency) {
 function load_purchase_history(item_code, $wrapper, currency) {
     let start = 0;
     const limit = 5;
-    
+
     $wrapper.html(`
         <table class="table table-bordered table-hover purchase-table">
             <thead>
@@ -742,7 +838,7 @@ function load_purchase_history(item_code, $wrapper, currency) {
         frappe.call({
             method: "sales_order_customization.api.sales_order_actions.get_item_purchase_history",
             args: { item_code: item_code, start: start, limit: limit },
-            callback: function(r) {
+            callback: function (r) {
                 let data = r.message || [];
                 render_history_rows(data, $tbody, 'purchase', currency);
                 if (data.length === limit) {
@@ -767,11 +863,11 @@ function render_history_rows(data, $tbody, type, currency) {
         let party = type === 'sales' ? d.customer : d.supplier;
         let p_url = type === 'sales' ? `/app/customer/${party}` : `/app/supplier/${party}`;
         let doc_url = type === 'sales' ? `/app/sales-invoice/${d.invoice_name}` : `/app/purchase-invoice/${d.invoice_name}`;
-        
+
         // Use system default if currency is not available or use passed currency
         let f_rate = format_currency(d.rate, currency);
         let f_amount = format_currency(d.amount, currency);
-        
+
         let html = `<tr>
             <td>${frappe.datetime.str_to_user(d.posting_date)}</td>
             <td><a href="${doc_url}" target="_blank"><strong>${d.invoice_name}</strong></a></td>
@@ -790,7 +886,7 @@ function render_history_rows(data, $tbody, type, currency) {
 
 function setup_table_sorting($table) {
     $table.find('th').css('cursor', 'pointer').attr('title', __("Click to sort"));
-    $table.find('th').on('click', function() {
+    $table.find('th').on('click', function () {
         const table = $(this).parents('table').eq(0);
         const rows = table.find('tbody tr').toArray().sort(comparer($(this).index()));
         this.asc = !this.asc;
@@ -802,7 +898,7 @@ function setup_table_sorting($table) {
 }
 
 function comparer(index) {
-    return function(a, b) {
+    return function (a, b) {
         const valA = getCellValue(a, index), valB = getCellValue(b, index);
         return $.isNumeric(valA) && $.isNumeric(valB) ? valA - valB : valA.toString().localeCompare(valB);
     };

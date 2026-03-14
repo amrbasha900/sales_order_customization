@@ -148,6 +148,7 @@ def create_sales_invoice(args):
         frappe.throw(_("Mode of Payment is required when creating a Payment Entry."))
 
     so = frappe.get_doc("Sales Order", sales_order)
+    company_update_stock = frappe.db.get_value("Company", so.company, "custom_update_stock")
     billed_qty_map = _get_billed_qty_map(sales_order)
 
     # Validate each selected item
@@ -197,7 +198,7 @@ def create_sales_invoice(args):
     for item in items_to_remove:
         si.items.remove(item)
 
-    si.update_stock = 1
+    si.update_stock = cint(company_update_stock)
     si.set_missing_values()
     si.calculate_taxes_and_totals()
     si.insert(ignore_permissions=False)
@@ -222,16 +223,18 @@ def create_sales_invoice(args):
 # ──────────────────────────────────────────────────────────
 
 @frappe.whitelist()
-def auto_create_invoice_and_payment(sales_order, payments):
-    """Auto-create a Sales Invoice for ALL SO items and Payment Entries.
+def auto_create_invoice_and_payment(sales_order, payments, create_without_payment=0):
+    """
+    1. Create & Submit Sales Invoice for ALL items in the Sales Order
+    2. Optional: Create & Submit Payment Entries for the given payments
 
-    Called from the custom "Submit & Pay" button after SO submit.
-
-    Args:
-        sales_order : str  – Sales Order name
-        payments    : str/list – [
-            {mode_of_payment, amount, reference_no, reference_date}, …
+    args:
+        sales_order : str 
+        payments    : list of dicts: [
+            {"mode_of_payment": "Cash", "amount": 100, "reference_no": "...", "reference_date": "..."},
+            ...
         ]
+        create_without_payment: int (1 or 0) - if 1, skips payment validations and creation
     """
     if isinstance(payments, str):
         payments = json.loads(payments)
@@ -240,52 +243,68 @@ def auto_create_invoice_and_payment(sales_order, payments):
         frappe.throw(_("Sales Order is required."))
 
     so = frappe.get_doc("Sales Order", sales_order)
+    company_update_stock = frappe.db.get_value("Company", so.company, "custom_update_stock")
 
-    if so.docstatus != 1:
-        frappe.throw(_("Sales Order {0} must be submitted.").format(sales_order))
+    if so.docstatus == 0:
+        so.submit()
+    elif so.docstatus == 2:
+        frappe.throw(_("Sales Order {0} is cancelled.").format(sales_order))
+        
+    create_without_payment = cint(create_without_payment)
 
-    if not payments or not len(payments):
-        frappe.throw(_("At least one payment row is required."))
-
-    # Validate each payment row has a mode_of_payment and positive amount
     total_payment = 0
-    for idx, p in enumerate(payments, 1):
-        if not p.get("mode_of_payment"):
-            frappe.throw(_("Row {0}: Mode of Payment is required.").format(idx))
-        if flt(p.get("amount")) <= 0:
-            frappe.throw(_("Row {0}: Amount must be greater than zero.").format(idx))
-        total_payment += flt(p.get("amount"))
+    if payments:
+        # Validate each payment row has a mode_of_payment and positive amount
+        for idx, p in enumerate(payments, 1):
+            if not p.get("mode_of_payment"):
+                frappe.throw(_("Row {0}: Mode of Payment is required.").format(idx))
+            if flt(p.get("amount")) <= 0:
+                frappe.throw(_("Row {0}: Amount must be greater than zero.").format(idx))
+            total_payment += flt(p.get("amount"))
 
     # ── Create Sales Invoice for ALL items ─────────
     from erpnext.selling.doctype.sales_order.sales_order import make_sales_invoice
 
     si = make_sales_invoice(sales_order)
-    si.update_stock = 1
+    si.update_stock = cint(company_update_stock)
     si.set_missing_values()
     si.calculate_taxes_and_totals()
     si.insert(ignore_permissions=False)
     si.submit()
 
-    # Validate total payment equals invoice grand total
-    if flt(total_payment, 2) != flt(si.grand_total, 2):
-        frappe.throw(
-            _("Total payment amount ({0}) does not match Invoice Grand Total ({1}).").format(
-                frappe.format_value(total_payment, {"fieldtype": "Currency"}),
-                frappe.format_value(si.grand_total, {"fieldtype": "Currency"}),
+    # ── Validation of total payment vs invoice grand total ──
+    if not create_without_payment:
+        # Strict equality when NOT creating without payment
+        if flt(total_payment, 2) != flt(si.grand_total, 2):
+            frappe.throw(
+                _("Total payment amount ({0}) must match Invoice Grand Total ({1}).").format(
+                    frappe.format_value(total_payment, {"fieldtype": "Currency"}),
+                    frappe.format_value(si.grand_total, {"fieldtype": "Currency"}),
+                )
             )
-        )
+    else:
+        # Partial allowed when creating without payment, but cannot EXCEED
+        if flt(total_payment, 2) > flt(si.grand_total, 2):
+            frappe.throw(
+                _("Total payment amount ({0}) cannot exceed Invoice Grand Total ({1}).").format(
+                    frappe.format_value(total_payment, {"fieldtype": "Currency"}),
+                    frappe.format_value(si.grand_total, {"fieldtype": "Currency"}),
+                )
+            )
 
-    # ── Create Payment Entries (one per payment row) ──
     payment_entries = []
-    for p in payments:
-        pe = _create_payment_entry(
-            si.name,
-            p.get("mode_of_payment"),
-            paid_amount=flt(p.get("amount")),
-            reference_no=p.get("reference_no"),
-            reference_date=p.get("reference_date"),
-        )
-        payment_entries.append(pe.name)
+    
+    # ── Create Payment Entries (one per payment row) if any ──
+    if payments:
+        for p in payments:
+            pe = _create_payment_entry(
+                si.name,
+                p.get("mode_of_payment"),
+                paid_amount=flt(p.get("amount")),
+                reference_no=p.get("reference_no"),
+                reference_date=p.get("reference_date"),
+            )
+            payment_entries.append(pe.name)
 
     frappe.db.commit()
 
@@ -326,6 +345,8 @@ def create_sales_return(args):
 
     # ── Validations ────────────────────────────────
     _validate_sales_order(sales_order)
+    so_company = frappe.db.get_value("Sales Order", sales_order, "company")
+    company_update_stock = frappe.db.get_value("Company", so_company, "custom_update_stock")
 
     if not items:
         frappe.throw(_("Please select at least one item to return."))
@@ -409,7 +430,7 @@ def create_sales_return(args):
             "sales_invoice": si_name,
         })
 
-        return_doc.update_stock = 1
+        return_doc.update_stock = cint(company_update_stock)
         return_doc.run_method("calculate_taxes_and_totals")
         return_doc.insert(ignore_permissions=False)
 
@@ -461,6 +482,38 @@ def get_last_sales_rate(customer, item_code):
     
     return flt(rate[0][0]) if rate else 0.0
 
+
+# ──────────────────────────────────────────────────────────
+#  PRINT INVOICE API
+# ──────────────────────────────────────────────────────────
+
+@frappe.whitelist()
+def get_sales_invoice_print_url(sales_order):
+    """Get the print URL for the connected Sales Invoice using the format defined in the Company."""
+    so_doc = frappe.get_doc("Sales Order", sales_order)
+    
+    # 1. Find the Sales Invoice that's linked to this Sales Order
+    si_name = frappe.db.sql('''
+        SELECT parent 
+        FROM `tabSales Invoice Item` 
+        WHERE sales_order = %(so)s AND docstatus = 1
+        LIMIT 1
+    ''', {"so": sales_order})
+    
+    if not si_name:
+        frappe.throw(_("No valid Sales Invoice found for this Sales Order."))
+        
+    si_name = si_name[0][0]
+    
+    # 2. Check the company configuration for the print format
+    print_format = frappe.db.get_value("Company", so_doc.company, "custom_sales_order_print_format_button")
+    
+    if not print_format:
+        frappe.throw(_("Print Format not configured in Company {0}. Please set 'Sales Order Print Format Button' in the Company record.").format(so_doc.company))
+
+    # 3. Build the URL
+    url = f"/api/method/frappe.utils.print_format.download_pdf?doctype=Sales Invoice&name={si_name}&format={print_format}&no_letterhead=0"
+    return {"url": url}
 
 # ──────────────────────────────────────────────────────────
 #  GET ITEM HISTORY FOR ACTION BUTTON
