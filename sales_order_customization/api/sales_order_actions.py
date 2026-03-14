@@ -314,32 +314,54 @@ def auto_create_invoice_and_payment(sales_order, payments, create_without_paymen
     }
 
 
-# ──────────────────────────────────────────────────────────
-#  CREATE SALES RETURN (Credit Note)
-# ──────────────────────────────────────────────────────────
+@frappe.whitelist()
+def calculate_return_totals(args):
+    """Simulate return creation to calculate grand totals (including taxes)."""
+    args = _parse_args(args)
+    items = args.get("items") or []
+    if not items:
+        return {"total_grand_total": 0.0}
+
+    # Group items by Sales Invoice
+    si_groups = {}
+    for row in items:
+        si_groups.setdefault(row.get("sales_invoice"), []).append(row)
+
+    from erpnext.controllers.sales_and_purchase_return import make_return_doc
+    total_grand_total = 0.0
+
+    for si_name, si_items in si_groups.items():
+        try:
+            return_doc = make_return_doc("Sales Invoice", si_name)
+            si_item_qty_map = {r["si_item_name"]: flt(r["qty"]) for r in si_items}
+
+            items_to_keep = []
+            for ret_item in return_doc.items:
+                orig_si_item = ret_item.sales_invoice_item
+                if orig_si_item in si_item_qty_map:
+                    ret_item.qty = -1 * si_item_qty_map[orig_si_item]
+                    items_to_keep.append(ret_item)
+            
+            return_doc.items = items_to_keep
+            return_doc.run_method("calculate_taxes_and_totals")
+            # For returns, grand_total is typically negative in ERPNext
+            total_grand_total += abs(flt(return_doc.grand_total))
+        except Exception:
+            # If make_return_doc fails for one SI, skip it in calculation
+            continue
+
+    return {"total_grand_total": total_grand_total}
+
 
 @frappe.whitelist()
 def create_sales_return(args):
-    """Create Credit Note(s) from selected invoiced items.
-
-    Since ERPNext requires return_against to point to a single Sales Invoice,
-    one Credit Note is created **per source Sales Invoice**.
-
-    Args (JSON string or dict):
-        sales_order       : str   – Sales Order name
-        items             : list  – [{sales_invoice, si_item_name, qty}, …]
-        submit            : bool  – auto-submit the return
-        return_reason     : str   – reason for the return (set on custom_return_reason)
-        create_refund     : bool  – create and submit Refund Payment Entries
-        payments          : list  – [{mode_of_payment, amount, reference_no, reference_date}, …]
-                                    required when create_refund is True
-    """
+    """Create Credit Note(s) from selected invoiced items."""
     args = _parse_args(args)
 
     sales_order = args.get("sales_order")
     items = args.get("items") or []
     submit = cint(args.get("submit"))
-    create_refund = cint(args.get("create_refund"))
+    create_without_refund = cint(args.get("create_without_refund"))
     return_reason = args.get("return_reason") or ""
     payments = args.get("payments") or []
 
@@ -354,14 +376,14 @@ def create_sales_return(args):
     if not return_reason:
         frappe.throw(_("Return Reason is required."))
 
-    if create_refund:
-        if not payments or not len(payments):
-            frappe.throw(_("At least one payment row is required for refund."))
+    total_payment = 0
+    if payments:
         for idx, p in enumerate(payments, 1):
             if not p.get("mode_of_payment"):
                 frappe.throw(_("Refund Row {0}: Mode of Payment is required.").format(idx))
             if flt(p.get("amount")) <= 0:
                 frappe.throw(_("Refund Row {0}: Amount must be greater than zero.").format(idx))
+            total_payment += flt(p.get("amount"))
 
     returned_qty_map = _get_returned_qty_map(sales_order)
 
@@ -399,6 +421,7 @@ def create_sales_return(args):
     from erpnext.controllers.sales_and_purchase_return import make_return_doc
 
     result = {"returns": [], "payment_entries": []}
+    total_grand_total = 0.0
 
     for si_name, si_items in si_groups.items():
         # Build the return qty map for filtering
@@ -438,18 +461,60 @@ def create_sales_return(args):
             return_doc.submit()
 
         result["returns"].append(return_doc.name)
+        total_grand_total += abs(flt(return_doc.grand_total))
 
-        # ── Optional Refund Payment Entries ────────
-        if create_refund and submit:
-            for p in payments:
-                pe = _create_payment_entry(
-                    return_doc.name,
-                    p.get("mode_of_payment"),
-                    paid_amount=flt(p.get("amount")),
-                    reference_no=p.get("reference_no"),
-                    reference_date=p.get("reference_date"),
+    # ── Validation of total payment vs return grand totals ──
+    if not create_without_refund:
+        if flt(total_payment, 2) != flt(total_grand_total, 2):
+            frappe.throw(
+                _("Total refund amount ({0}) must match Returns Grand Total ({1}).").format(
+                    frappe.format_value(total_payment, {"fieldtype": "Currency"}),
+                    frappe.format_value(total_grand_total, {"fieldtype": "Currency"}),
                 )
-                result["payment_entries"].append(pe.name)
+            )
+    else:
+        if flt(total_payment, 2) > flt(total_grand_total, 2):
+            frappe.throw(
+                _("Total refund amount ({0}) cannot exceed Returns Grand Total ({1}).").format(
+                    frappe.format_value(total_payment, {"fieldtype": "Currency"}),
+                    frappe.format_value(total_grand_total, {"fieldtype": "Currency"}),
+                )
+            )
+
+    # ── Optional Refund Payment Entries ────────
+    if total_payment > 0:
+        # Multi-return case: distribute payments
+        remaining_payments = payments[:]
+        for return_name in result["returns"]:
+            if not remaining_payments:
+                break
+            
+            return_doc = frappe.get_doc("Sales Invoice", return_name)
+            available_to_refund = abs(flt(return_doc.grand_total))
+            
+            new_remaining = []
+            for p in remaining_payments:
+                if available_to_refund <= 0:
+                    new_remaining.append(p)
+                    continue
+                
+                amount_to_pay = min(flt(p.get("amount")), available_to_refund)
+                if amount_to_pay > 0:
+                    pe = _create_payment_entry(
+                        return_doc.name,
+                        p.get("mode_of_payment"),
+                        paid_amount=amount_to_pay,
+                        reference_no=p.get("reference_no"),
+                        reference_date=p.get("reference_date"),
+                    )
+                    result["payment_entries"].append(pe.name)
+                    available_to_refund -= amount_to_pay
+                    p["amount"] = flt(p["amount"]) - amount_to_pay
+                
+                if flt(p.get("amount", 0)) > 0:
+                    new_remaining.append(p)
+            
+            remaining_payments = new_remaining
 
     frappe.db.commit()
     return result

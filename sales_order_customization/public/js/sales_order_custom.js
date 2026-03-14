@@ -15,32 +15,16 @@ frappe.ui.form.on("Sales Order", {
                 __("Submit & Pay"),
                 () => show_submit_and_pay_dialog(frm),
             );
-            // Style it as a primary-like button
             frm.custom_buttons[__("Submit & Pay")]
                 && frm.custom_buttons[__("Submit & Pay")].addClass("btn-primary-dark");
         }
 
-        // ── Submitted: show "Create Return" button ────
+        // ── Submitted: show "Create Return" and "Print Invoice" as top-level buttons ────
         if (frm.doc.docstatus !== 1) return;
         if (["Cancelled", "Closed"].includes(frm.doc.status)) return;
 
-        frappe.call({
-            method: "sales_order_customization.api.sales_order_actions.get_returnable_items",
-            args: { sales_order: frm.doc.name },
-            async: true,
-            callback(r) {
-                if (r.message && r.message.length) {
-                    frm.add_custom_button(
-                        __("Create Return"),
-                        () => show_return_dialog(frm, r.message),
-                        __("Actions")
-                    );
-                }
-            }
-        });
-
-        // ── Print Invoice Button ────        // ── Print Invoice Button ────
-        if (frm.doc.status === "To Deliver and Bill" || frm.doc.status === "To Bill" || frm.doc.status === "To Deliver" || frm.doc.status === "Completed") {
+        // Print Invoice button
+        if (["To Deliver and Bill", "To Bill", "To Deliver", "Completed"].includes(frm.doc.status)) {
             frm.add_custom_button(
                 __("Print Invoice"),
                 function () {
@@ -53,10 +37,28 @@ frappe.ui.form.on("Sales Order", {
                             }
                         }
                     });
-                },
-                __("Actions")
+                }
             );
+            frm.custom_buttons[__("Print Invoice")]
+                && frm.custom_buttons[__("Print Invoice")].addClass("btn-default");
         }
+
+        // Create Return button
+        frappe.call({
+            method: "sales_order_customization.api.sales_order_actions.get_returnable_items",
+            args: { sales_order: frm.doc.name },
+            async: true,
+            callback(r) {
+                if (r.message && r.message.length) {
+                    frm.add_custom_button(
+                        __("Create Return"),
+                        () => show_return_dialog(frm, r.message),
+                    );
+                    frm.custom_buttons[__("Create Return")]
+                        && frm.custom_buttons[__("Create Return")].addClass("btn-default");
+                }
+            }
+        });
     },
 
     customer(frm) {
@@ -172,33 +174,19 @@ function show_submit_and_pay_dialog(frm) {
                     total_payment += flt(p.amount);
                 }
 
-                if (create_without_payment) {
-                    if (flt(total_payment, 2) > flt(grand_total, 2)) {
-                        frappe.msgprint(
-                            __("Total payment ({0}) cannot exceed Grand Total ({1}).", [
-                                format_currency(total_payment, frm.doc.currency),
-                                format_currency(grand_total, frm.doc.currency),
-                            ])
-                        );
-                        return;
-                    }
-                } else {
-                    if (flt(total_payment, 2) !== flt(grand_total, 2)) {
-                        frappe.msgprint(
-                            __("Total payment ({0}) must match Grand Total ({1}).", [
-                                format_currency(total_payment, frm.doc.currency),
-                                format_currency(grand_total, frm.doc.currency),
-                            ])
-                        );
-                        return;
-                    }
+                if (flt(total_payment, 2) !== flt(grand_total, 2)) {
+                    frappe.msgprint(
+                        __("Total payment ({0}) must match Grand Total ({1}).", [
+                            format_currency(total_payment, frm.doc.currency),
+                            format_currency(grand_total, frm.doc.currency),
+                        ])
+                    );
+                    return;
                 }
             }
 
             d.hide();
 
-            // Step 1: Save if dirty, then create Invoice + (Optionally) Payment Entries
-            // (The backend now handles SO submission atomically)
             (frm.is_dirty() ? frm.save() : Promise.resolve()).then(() => {
                 return frappe.xcall(
                     "sales_order_customization.api.sales_order_actions.auto_create_invoice_and_payment",
@@ -223,7 +211,7 @@ function show_submit_and_pay_dialog(frm) {
                             `<a href="/app/payment-entry/${pe_name}">${pe_name}</a>`,
                         ]);
                     });
-                    frappe.msgprint({ message: msg, indicator: "green", title: __("Success") });
+                    frappe.show_alert({ message: msg, indicator: "green" }, 5);
                     frm.reload_doc();
                 })
                 .catch((err) => {
@@ -237,42 +225,9 @@ function show_submit_and_pay_dialog(frm) {
         },
     });
 
-    // Auto-calculate remaining amount when adding a new row
-    const original_add_new_row = d.fields_dict.payments.grid.add_new_row.bind(
-        d.fields_dict.payments.grid
-    );
-    console.log(d.fields_dict.payments.grid);
-
-    d.fields_dict.payments.grid.add_new_row = function (...args) {
-        const result = original_add_new_row(...args);
-
-        const grid = d.fields_dict.payments.grid;
-        const data = grid.get_data() || [];
-        if (!data.length) return result;
-
-        const last_row = data[data.length - 1];
-        if (!last_row) return result;
-
-        // Sum all rows except the last one
-        let already_filled = 0;
-        data.forEach((row, i) => {
-            if (i < data.length - 1) {
-                already_filled += flt(row.amount || 0);
-            }
-        });
-
-        const remaining = flt(grand_total) - already_filled;
-
-        // Set directly on the row object — no doctype needed
-        last_row.amount = remaining > 0 ? remaining : 0;
-
-        // Refresh the entire grid so the cell renders the new value
-        grid.refresh();
-
-        return result;
-    };
-
+    // ── Auto-fill amount on new row ─────────────────────
     d.show();
+    setup_payment_grid_auto_amount(d, "payments", () => grand_total);
 }
 
 // ═══════════════════════════════════════════════════════
@@ -280,14 +235,45 @@ function show_submit_and_pay_dialog(frm) {
 // ═══════════════════════════════════════════════════════
 
 function show_return_dialog(frm, rows) {
-    // Pre-calculate total returnable amount
-    const total_returnable = rows.reduce((sum, r) => sum + flt(r.amount), 0);
+    let calculated_grand_total = 0;
 
     const dialog = show_action_dialog({
         title: __("Create Sales Return / Credit Note"),
         frm,
         rows,
         columns: get_return_columns(),
+        on_change(selected) {
+            if (!selected.length) {
+                calculated_grand_total = 0;
+                dialog.fields_dict.total_refund_info.$wrapper.html("");
+                return;
+            }
+
+            frappe.call({
+                method: "sales_order_customization.api.sales_order_actions.calculate_return_totals",
+                args: {
+                    args: JSON.stringify({
+                        items: selected.map(r => ({
+                            sales_invoice: r.sales_invoice,
+                            si_item_name: r.si_item_name,
+                            qty: flt(r.qty)
+                        }))
+                    })
+                },
+                callback(r) {
+                    if (r.message) {
+                        calculated_grand_total = flt(r.message.total_grand_total);
+                        const html = `
+                            <div class="alert alert-info" style="margin-top:10px; margin-bottom:0;">
+                                ${__("Expected Refund Amount (Incl. Taxes)")}: 
+                                <strong>${format_currency(calculated_grand_total, frm.doc.currency)}</strong>
+                            </div>
+                        `;
+                        dialog.fields_dict.total_refund_info.$wrapper.html(html);
+                    }
+                }
+            });
+        },
         row_mapper: (r) => ({
             sales_invoice: r.sales_invoice,
             si_item_name: r.si_item_name,
@@ -305,6 +291,10 @@ function show_return_dialog(frm, rows) {
         max_qty_field: "remaining_qty",
         option_fields: [
             {
+                fieldname: "total_refund_info",
+                fieldtype: "HTML",
+            },
+            {
                 fieldname: "return_reason",
                 label: __("Return Reason"),
                 fieldtype: "Data",
@@ -312,20 +302,15 @@ function show_return_dialog(frm, rows) {
             },
             { fieldtype: "Section Break" },
             {
-                fieldname: "create_refund",
-                label: __("Create Refund Payment Entry"),
+                fieldname: "create_without_refund",
+                label: __("Create Return without Refund"),
                 fieldtype: "Check",
-                default: 1,
-                onchange() {
-                    const val = dialog.get_value("create_refund");
-                    dialog.fields_dict.refund_payments_section.toggle(val);
-                },
+                default: 0,
             },
             {
                 fieldname: "refund_payments_section",
                 fieldtype: "Section Break",
                 label: __("Refund Payments"),
-                hidden: 0,
             },
             {
                 fieldname: "refund_payments",
@@ -397,37 +382,42 @@ function show_return_dialog(frm, rows) {
                 }
             }
 
-            const create_refund = opts.create_refund;
-            let refund_payments = [];
+            const create_without_refund = opts.create_without_refund;
+            let refund_payments = opts.refund_payments || [];
 
-            if (create_refund) {
-                refund_payments = opts.refund_payments || [];
-                if (!refund_payments.length) {
-                    frappe.msgprint(__("Please add at least one refund payment row."));
+            let total_refund = 0;
+            for (const [idx, p] of refund_payments.entries()) {
+                if (!p.mode_of_payment) {
+                    frappe.msgprint(__("Refund Row {0}: Mode of Payment is required.", [idx + 1]));
                     return;
                 }
-
-                // Calculate total return amount from selected items
-                const total_return = selected.reduce((sum, r) => sum + flt(r.qty) * flt(r.rate), 0);
-                let total_refund = 0;
-
-                for (const [idx, p] of refund_payments.entries()) {
-                    if (!p.mode_of_payment) {
-                        frappe.msgprint(__("Refund Row {0}: Mode of Payment is required.", [idx + 1]));
-                        return;
-                    }
-                    if (flt(p.amount) <= 0) {
-                        frappe.msgprint(__("Refund Row {0}: Amount must be greater than zero.", [idx + 1]));
-                        return;
-                    }
-                    total_refund += flt(p.amount);
+                if (flt(p.amount) <= 0) {
+                    frappe.msgprint(__("Refund Row {0}: Amount must be greater than zero.", [idx + 1]));
+                    return;
                 }
+                total_refund += flt(p.amount);
+            }
 
-                if (flt(total_refund, 2) !== flt(total_return, 2)) {
+            if (!create_without_refund) {
+                if (!refund_payments.length) {
+                    frappe.msgprint(__("Please add at least one refund payment row. Or check 'Create Return without Refund'."));
+                    return;
+                }
+                if (flt(total_refund, 2) !== flt(calculated_grand_total, 2)) {
                     frappe.msgprint(
-                        __("Total refund amount ({0}) does not match Total Return ({1}).", [
-                            format_currency(total_refund),
-                            format_currency(total_return),
+                        __("Total refund amount ({0}) must match Total Return Incl. Taxes ({1}).", [
+                            format_currency(total_refund, frm.doc.currency),
+                            format_currency(calculated_grand_total, frm.doc.currency),
+                        ])
+                    );
+                    return;
+                }
+            } else {
+                if (flt(total_refund, 2) > flt(calculated_grand_total, 2)) {
+                    frappe.msgprint(
+                        __("Total refund amount ({0}) cannot exceed Total Return Incl. Taxes ({1}).", [
+                            format_currency(total_refund, frm.doc.currency),
+                            format_currency(calculated_grand_total, frm.doc.currency),
                         ])
                     );
                     return;
@@ -448,7 +438,7 @@ function show_return_dialog(frm, rows) {
                         })),
                         submit: 1,
                         return_reason: opts.return_reason || "",
-                        create_refund: create_refund ? 1 : 0,
+                        create_without_refund: create_without_refund ? 1 : 0,
                         payments: refund_payments.map((p) => ({
                             mode_of_payment: p.mode_of_payment,
                             amount: flt(p.amount),
@@ -472,13 +462,60 @@ function show_return_dialog(frm, rows) {
                                 `<a href="/app/payment-entry/${name}">${name}</a>`,
                             ]) + "<br>";
                         });
-                        frappe.msgprint({ message: msg, indicator: "green", title: __("Success") });
+                        frappe.show_alert({ message: msg, indicator: "green" }, 5);
                         frm.reload_doc();
                     }
                 },
             });
         },
     });
+
+    // ── Auto-fill amount on new row ─────────────────────
+    // Uses a lazy getter () => calculated_grand_total so it always reads
+    // the latest value after on_change updates it via frappe.call
+    setup_payment_grid_auto_amount(
+        dialog,
+        "refund_payments",
+        () => calculated_grand_total
+    );
+}
+
+// ═══════════════════════════════════════════════════════
+//  AUTO-FILL REMAINING AMOUNT ON NEW PAYMENT ROW
+// ═══════════════════════════════════════════════════════
+
+function setup_payment_grid_auto_amount(dialog, fieldname, get_total_fn) {
+    const grid = dialog.fields_dict[fieldname] && dialog.fields_dict[fieldname].grid;
+    if (!grid) return;
+
+    const original_add_new_row = grid.add_new_row.bind(grid);
+
+    grid.add_new_row = function (...args) {
+        const result = original_add_new_row(...args);
+
+        const data = grid.get_data() || [];
+        if (!data.length) return result;
+
+        const last_row = data[data.length - 1];
+        if (!last_row) return result;
+
+        // Sum all rows except the last (newly added) one
+        let already_filled = 0;
+        data.forEach((row, i) => {
+            if (i < data.length - 1) {
+                already_filled += flt(row.amount || 0);
+            }
+        });
+
+        const total = flt(get_total_fn());
+        const remaining = total - already_filled;
+
+        // Set directly on the row object — dialog table rows have no doctype
+        last_row.amount = remaining > 0 ? remaining : 0;
+
+        grid.refresh();
+        return result;
+    };
 }
 
 // ═══════════════════════════════════════════════════════
@@ -515,13 +552,13 @@ function show_action_dialog(opts) {
     const all_mapped_rows = (opts.rows || []).map(opts.row_mapper);
     dialog._all_mapped_rows = all_mapped_rows;
 
-    render_items_table(dialog, opts.columns, all_mapped_rows, opts.qty_field, opts.max_qty_field);
+    render_items_table(dialog, opts.columns, all_mapped_rows, opts.qty_field, opts.max_qty_field, opts.on_change);
 
     dialog.show();
     return dialog;
 }
 
-function render_items_table(dialog, columns, rows, qty_field, max_qty_field) {
+function render_items_table(dialog, columns, rows, qty_field, max_qty_field, on_change) {
     const wrapper = dialog.fields_dict.items_html.$wrapper;
     wrapper.empty();
 
@@ -563,6 +600,11 @@ function render_items_table(dialog, columns, rows, qty_field, max_qty_field) {
 
     wrapper.find(".select-all").on("change", function () {
         wrapper.find(".row-check").prop("checked", this.checked);
+        if (on_change) on_change(get_selected_rows(dialog));
+    });
+
+    wrapper.find(".row-check").on("change", function () {
+        if (on_change) on_change(get_selected_rows(dialog));
     });
 
     wrapper.find(".qty-input").on("change input", function () {
@@ -576,6 +618,8 @@ function render_items_table(dialog, columns, rows, qty_field, max_qty_field) {
         rows[idx].amount = val * rate;
         const amountTd = $(this).closest("tr").find("td").last();
         amountTd.text(format_currency(rows[idx].amount));
+
+        if (on_change) on_change(get_selected_rows(dialog));
     });
 }
 
@@ -662,7 +706,7 @@ function show_item_dashboard_dialog(frm, row) {
         ]
     });
 
-    const unique_id = frappe.utils.get_random(8); // Ensure uniqueness when reopening
+    const unique_id = frappe.utils.get_random(8);
     const html = `
         <div class="item-dashboard-container">
             <ul class="nav nav-tabs" role="tablist">
@@ -694,15 +738,13 @@ function show_item_dashboard_dialog(frm, row) {
 
     dialog.show();
 
-    // Load Stock Data immediately
     load_warehouse_stock(frm, row.item_code, dialog.fields_dict.dashboard_html.$wrapper.find(`#tab-stock-${unique_id}`));
 
-    // Lazy load the others on first click
     let sales_loaded = false;
     let purchases_loaded = false;
 
     dialog.fields_dict.dashboard_html.$wrapper.find('a[data-toggle="tab"]').on('shown.bs.tab', function (e) {
-        const target = $(e.target).attr("data-target"); // activated tab
+        const target = $(e.target).attr("data-target");
         if (target === `#tab-sales-${unique_id}` && !sales_loaded) {
             sales_loaded = true;
             load_sales_history(row.item_code, dialog.fields_dict.dashboard_html.$wrapper.find(`#tab-sales-${unique_id}`), frm.doc.currency);
@@ -864,7 +906,6 @@ function render_history_rows(data, $tbody, type, currency) {
         let p_url = type === 'sales' ? `/app/customer/${party}` : `/app/supplier/${party}`;
         let doc_url = type === 'sales' ? `/app/sales-invoice/${d.invoice_name}` : `/app/purchase-invoice/${d.invoice_name}`;
 
-        // Use system default if currency is not available or use passed currency
         let f_rate = format_currency(d.rate, currency);
         let f_amount = format_currency(d.amount, currency);
 
@@ -912,4 +953,3 @@ function getCellValue(row, index) {
     const val = td.text().replace(/[\$,]/g, '');
     return val;
 }
-
