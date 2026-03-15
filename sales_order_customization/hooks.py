@@ -21,7 +21,10 @@ fixtures = [
     {"dt": "Custom Field", "filters": [
         [
             "name", "in", [
-                "Sales Order Item-custom_last_rate", "Sales Order Item-custom_action", "Company-custom_update_stock", "Company-custom_sales_order_print_format_button"
+                "Sales Order Item-custom_last_rate", "Sales Order Item-custom_action", "Company-custom_update_stock",
+                 "Company-custom_sales_order_print_format_button", "Sales Order-custom_customer_balance",
+                 "Company-custom_print_sales_order_matrix", "Company-custom_sales_order_return_print_format_button",
+                 "Company-custom_print_sales_order_return_matrix"
             ]
         ]
     ]}

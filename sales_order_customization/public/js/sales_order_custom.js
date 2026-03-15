@@ -7,6 +7,11 @@
  */
 
 frappe.ui.form.on("Sales Order", {
+    onload(frm) {
+        if (frm.is_new() && !frm.doc.delivery_date) {
+            frm.set_value("delivery_date", frappe.datetime.get_today());
+        }
+    },
 
     refresh(frm) {
         // ── Draft: show "Submit & Pay" button ─────────
@@ -59,9 +64,46 @@ frappe.ui.form.on("Sales Order", {
                 }
             }
         });
+
+        // Print Sales Return button
+        frappe.call({
+            method: "sales_order_customization.api.sales_order_actions.get_sales_returns",
+            args: { sales_order: frm.doc.name },
+            callback: function (r) {
+                if (r.message && r.message.length) {
+                    frm.add_custom_button(
+                        __("Print Sales Return"),
+                        function () {
+                            handle_print_sales_return(frm, r.message);
+                        }
+                    );
+                    frm.custom_buttons[__("Print Sales Return")]
+                        && frm.custom_buttons[__("Print Sales Return")].addClass("btn-default");
+                }
+            }
+        });
     },
 
     customer(frm) {
+
+        if (frm.doc.customer && frm.doc.company) {
+            // Fetch customer outstanding amount  
+            frappe.call({
+                method: 'sales_order_customization.api.sales_order_actions.get_customer_outstanding_amount',
+                args: {
+                    customer: frm.doc.customer,
+                    company: frm.doc.company
+                },
+                callback: function (r) {
+                    if (r.message !== undefined) {
+                        frm.set_value('custom_customer_balance', r.message);
+                    }
+                }
+            });
+        } else {
+            frm.set_value('custom_customer_balance', 0);
+        }
+
         if (!frm.doc.customer || !frm.doc.items || !frm.doc.items.length) return;
 
         // Iterate through all items and update the custom_last_rate for the new customer
@@ -71,7 +113,8 @@ frappe.ui.form.on("Sales Order", {
                     method: "sales_order_customization.api.sales_order_actions.get_last_sales_rate",
                     args: {
                         customer: frm.doc.customer,
-                        item_code: row.item_code
+                        item_code: row.item_code,
+                        uom: row.uom
                     },
                     callback: function (r) {
                         if (r.message !== undefined) {
@@ -81,6 +124,7 @@ frappe.ui.form.on("Sales Order", {
                 });
             }
         });
+
     }
 });
 
@@ -659,25 +703,11 @@ function get_return_columns() {
 
 frappe.ui.form.on("Sales Order Item", {
     item_code(frm, cdt, cdn) {
-        const row = locals[cdt][cdn];
+        update_last_sales_rate(frm, cdt, cdn);
+    },
 
-        if (!frm.doc.customer || !row.item_code) {
-            frappe.model.set_value(cdt, cdn, "custom_last_rate", 0);
-            return;
-        }
-
-        frappe.call({
-            method: "sales_order_customization.api.sales_order_actions.get_last_sales_rate",
-            args: {
-                customer: frm.doc.customer,
-                item_code: row.item_code,
-            },
-            callback(r) {
-                if (!r.exc) {
-                    frappe.model.set_value(cdt, cdn, "custom_last_rate", flt(r.message));
-                }
-            }
-        });
+    uom(frm, cdt, cdn) {
+        update_last_sales_rate(frm, cdt, cdn);
     },
 
     custom_action(frm, cdt, cdn) {
@@ -689,6 +719,33 @@ frappe.ui.form.on("Sales Order Item", {
         show_item_dashboard_dialog(frm, row);
     }
 });
+
+// ═══════════════════════════════════════════════════════
+//  ITEM RATE HELPERS
+// ═══════════════════════════════════════════════════════
+
+function update_last_sales_rate(frm, cdt, cdn) {
+    const row = locals[cdt][cdn];
+
+    if (!frm.doc.customer || !row.item_code) {
+        frappe.model.set_value(cdt, cdn, "custom_last_rate", 0);
+        return;
+    }
+
+    frappe.call({
+        method: "sales_order_customization.api.sales_order_actions.get_last_sales_rate",
+        args: {
+            customer: frm.doc.customer,
+            item_code: row.item_code,
+            uom: row.uom
+        },
+        callback(r) {
+            if (!r.exc) {
+                frappe.model.set_value(cdt, cdn, "custom_last_rate", flt(r.message));
+            }
+        }
+    });
+}
 
 // ═══════════════════════════════════════════════════════
 //  ITEM DASHBOARD UI
@@ -807,6 +864,7 @@ function load_sales_history(item_code, $wrapper, currency) {
                     <th>${__("Customer")}</th>
                     <th class="text-right">${__("Rate")}</th>
                     <th class="text-right">${__("Qty")}</th>
+                    <th>${__("UOM")}</th>
                     <th class="text-right">${__("Amount")}</th>
                 </tr>
             </thead>
@@ -860,6 +918,7 @@ function load_purchase_history(item_code, $wrapper, currency) {
                     <th>${__("Supplier")}</th>
                     <th class="text-right">${__("Rate")}</th>
                     <th class="text-right">${__("Qty")}</th>
+                    <th>${__("UOM")}</th>
                     <th class="text-right">${__("Amount")}</th>
                 </tr>
             </thead>
@@ -909,15 +968,18 @@ function render_history_rows(data, $tbody, type, currency) {
         let f_rate = format_currency(d.rate, currency);
         let f_amount = format_currency(d.amount, currency);
 
-        let html = `<tr>
-            <td>${frappe.datetime.str_to_user(d.posting_date)}</td>
-            <td><a href="${doc_url}" target="_blank"><strong>${d.invoice_name}</strong></a></td>
-            <td><a href="${p_url}" target="_blank">${party}</a></td>
-            <td class="text-right" data-value="${flt(d.rate)}">${f_rate}</td>
-            <td class="text-right" data-value="${flt(d.qty)}"><strong>${flt(d.qty)}</strong></td>
-            <td class="text-right" data-value="${flt(d.amount)}">${f_amount}</td>
-        </tr>`;
-        $tbody.append(html);
+        let row_html = `
+            <tr>
+                <td>${frappe.datetime.str_to_user(d.posting_date)}</td>
+                <td><a href="${doc_url}" target="_blank"><strong>${d.invoice_name}</strong></a></td>
+                <td><a href="${p_url}" target="_blank">${party}</a></td>
+                <td class="text-right" data-value="${flt(d.rate)}">${f_rate}</td>
+                <td class="text-right" data-value="${flt(d.qty)}">${flt(d.qty)}</td>
+                <td>${d.uom || ''}</td>
+                <td class="text-right" data-value="${flt(d.amount)}"><strong>${f_amount}</strong></td>
+            </tr>
+        `;
+        $tbody.append(row_html);
     });
 }
 
@@ -952,4 +1014,53 @@ function getCellValue(row, index) {
     }
     const val = td.text().replace(/[\$,]/g, '');
     return val;
+}
+
+// ═══════════════════════════════════════════════════════
+//  PRINT SALES RETURN LOGIC
+// ═══════════════════════════════════════════════════════
+
+function handle_print_sales_return(frm, returns) {
+    if (returns.length === 1) {
+        // Direct print
+        print_return_invoice(frm, returns[0].name);
+    } else {
+        // Show selection dialog
+        const d = new frappe.ui.Dialog({
+            title: __("Select Sales Return to Print"),
+            fields: [
+                {
+                    label: __("Sales Return"),
+                    fieldname: "return_invoice",
+                    fieldtype: "Select",
+                    options: returns.map(r => ({
+                        label: `${r.name} (${frappe.datetime.str_to_user(r.posting_date)})`,
+                        value: r.name
+                    })),
+                    reqd: 1
+                }
+            ],
+            primary_action_label: __("Print"),
+            primary_action(values) {
+                print_return_invoice(frm, values.return_invoice);
+                d.hide();
+            }
+        });
+        d.show();
+    }
+}
+
+function print_return_invoice(frm, invoice_name) {
+    frappe.call({
+        method: "sales_order_customization.api.sales_order_actions.get_sales_return_print_url",
+        args: {
+            invoice_name: invoice_name,
+            sales_order: frm.doc.name
+        },
+        callback: function (r) {
+            if (r.message && r.message.url) {
+                window.open(r.message.url, "_blank");
+            }
+        }
+    });
 }

@@ -525,12 +525,12 @@ def create_sales_return(args):
 # ──────────────────────────────────────────────────────────
 
 @frappe.whitelist()
-def get_last_sales_rate(customer, item_code):
-    """Return the rate from the most recent submitted Sales Order for this customer and item."""
+def get_last_sales_rate(customer, item_code, uom=None):
+    """Return the rate from the most recent submitted Sales Order for this customer and item, matching UOM."""
     if not customer or not item_code:
         return 0.0
         
-    rate = frappe.db.sql("""
+    query = """
         SELECT
             sii.rate
         FROM `tabSales Order Item` sii
@@ -538,12 +538,20 @@ def get_last_sales_rate(customer, item_code):
         WHERE so.customer = %(customer)s
           AND sii.item_code = %(item_code)s
           AND so.docstatus = 1
-        ORDER BY so.transaction_date DESC, so.creation DESC
-        LIMIT 1
-    """, {
+    """
+    
+    params = {
         "customer": customer,
         "item_code": item_code
-    })
+    }
+    
+    if uom:
+        query += " AND sii.uom = %(uom)s"
+        params["uom"] = uom
+        
+    query += " ORDER BY so.transaction_date DESC, so.creation DESC LIMIT 1"
+    
+    rate = frappe.db.sql(query, params)
     
     return flt(rate[0][0]) if rate else 0.0
 
@@ -570,14 +578,96 @@ def get_sales_invoice_print_url(sales_order):
         
     si_name = si_name[0][0]
     
-    # 2. Check the company configuration for the print format
-    print_format = frappe.db.get_value("Company", so_doc.company, "custom_sales_order_print_format_button")
+    # 2. Check the company configuration for the print format and matrix toggle
+    settings = frappe.db.get_value("Company", so_doc.company, 
+        ["custom_sales_order_print_format_button", "custom_print_sales_order_matrix"], as_dict=True)
+    
+    print_format = settings.get("custom_sales_order_print_format_button")
+    use_matrix = settings.get("custom_print_sales_order_matrix")
     
     if not print_format:
         frappe.throw(_("Print Format not configured in Company {0}. Please set 'Sales Order Print Format Button' in the Company record.").format(so_doc.company))
 
     # 3. Build the URL
-    url = f"/api/method/frappe.utils.print_format.download_pdf?doctype=Sales Invoice&name={si_name}&format={print_format}&no_letterhead=0"
+    from urllib.parse import urlencode
+    
+    if use_matrix:
+        params = {
+            "doctype": "Sales Invoice",
+            "name": si_name,
+            "trigger_print": 1,
+            "format": print_format,
+            "no_letterhead": 1,
+            "letterhead": "No Letterhead",
+            "settings": "{}",
+            "_lang": "en"
+        }
+        url = f"/printview?{urlencode(params)}"
+    else:
+        params = {
+            "doctype": "Sales Invoice",
+            "name": si_name,
+            "format": print_format
+        }
+        url = f"/api/method/frappe.utils.print_format.download_pdf?{urlencode(params)}"
+        
+    return {"url": url}
+
+@frappe.whitelist()
+def get_sales_returns(sales_order):
+    """Return a list of submitted Sales Invoices that are returns for this Sales Order."""
+    if not sales_order:
+        return []
+
+    return frappe.db.sql("""
+        SELECT DISTINCT
+            si.name,
+            si.posting_date
+        FROM `tabSales Invoice` si
+        INNER JOIN `tabSales Invoice Item` sii ON sii.parent = si.name
+        WHERE sii.sales_order = %(so)s
+          AND si.is_return = 1
+          AND si.docstatus = 1
+        ORDER BY si.posting_date DESC, si.creation DESC
+    """, {"so": sales_order}, as_dict=True)
+
+@frappe.whitelist()
+def get_sales_return_print_url(invoice_name, sales_order):
+    """Get the print URL for a specific Sales Return invoice."""
+    so_doc = frappe.get_doc("Sales Order", sales_order)
+    
+    # Check the company configuration for the print format and matrix toggle
+    settings = frappe.db.get_value("Company", so_doc.company, 
+        ["custom_sales_order_return_print_format_button", "custom_print_sales_order_return_matrix"], as_dict=True)
+    
+    print_format = settings.get("custom_sales_order_return_print_format_button")
+    use_matrix = settings.get("custom_print_sales_order_return_matrix")
+    
+    if not print_format:
+        frappe.throw(_("Print Format not configured in Company {0}.").format(so_doc.company))
+
+    from urllib.parse import urlencode
+    
+    if use_matrix:
+        params = {
+            "doctype": "Sales Invoice",
+            "name": invoice_name,
+            "trigger_print": 1,
+            "format": print_format,
+            "no_letterhead": 1,
+            "letterhead": "No Letterhead",
+            "settings": "{}",
+            "_lang": "en"
+        }
+        url = f"/printview?{urlencode(params)}"
+    else:
+        params = {
+            "doctype": "Sales Invoice",
+            "name": invoice_name,
+            "format": print_format
+        }
+        url = f"/api/method/frappe.utils.print_format.download_pdf?{urlencode(params)}"
+        
     return {"url": url}
 
 # ──────────────────────────────────────────────────────────
@@ -627,6 +717,7 @@ def get_item_sales_history(item_code, limit=5, start=0):
             si.customer,
             sii.rate,
             sii.qty,
+            sii.uom,
             sii.amount
         FROM `tabSales Invoice Item` sii
         INNER JOIN `tabSales Invoice` si ON si.name = sii.parent
@@ -653,6 +744,7 @@ def get_item_purchase_history(item_code, limit=5, start=0):
             pi.supplier,
             pii.rate,
             pii.qty,
+            pii.uom,
             pii.amount
         FROM `tabPurchase Invoice Item` pii
         INNER JOIN `tabPurchase Invoice` pi ON pi.name = pii.parent
@@ -820,3 +912,8 @@ def _parse_args(args):
     if isinstance(args, str):
         args = json.loads(args)
     return frappe._dict(args)
+
+from erpnext.selling.doctype.customer.customer import get_customer_outstanding
+@frappe.whitelist()  
+def get_customer_outstanding_amount(customer, company, ignore_outstanding_sales_order=False, cost_center=None):
+    return get_customer_outstanding(customer, company, ignore_outstanding_sales_order, cost_center)
