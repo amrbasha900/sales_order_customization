@@ -557,6 +557,65 @@ def get_last_sales_rate(customer, item_code, uom=None):
 
 
 # ──────────────────────────────────────────────────────────
+#  GET FULL ITEM DETAILS FOR QUICK-ADD (single round trip)
+# ──────────────────────────────────────────────────────────
+
+@frappe.whitelist()
+def get_item_details_for_sales_order(item_code, company, customer=None,
+                                      currency=None, price_list=None,
+                                      qty=1, uom=None, warehouse=None,
+                                      conversion_rate=1, transaction_date=None,
+                                      ignore_pricing_rule=0):
+    """Return all item details needed to populate a Sales Order Item row.
+
+    Calls ERPNext's standard get_item_details internally, then appends
+    custom_last_rate. This replaces multiple sequential client-side AJAX calls
+    with a single backend round trip.
+    """
+    from erpnext.stock.get_item_details import get_item_details as _get_item_details
+
+    if not item_code or not company:
+        frappe.throw(_("Item Code and Company are required."))
+
+    args = frappe._dict({
+        "item_code": item_code,
+        "company": company,
+        "doctype": "Sales Order",
+        "child_doctype": "Sales Order Item",
+        "customer": customer or "",
+        "currency": currency or frappe.get_cached_value("Company", company, "default_currency"),
+        "selling_price_list": price_list or "",
+        "conversion_rate": flt(conversion_rate) or 1,
+        "price_list_currency": currency or frappe.get_cached_value("Company", company, "default_currency"),
+        "plc_conversion_rate": 1,
+        "qty": flt(qty) or 1,
+        "uom": uom or "",
+        "stock_uom": "",
+        "transaction_date": transaction_date or nowdate(),
+        "warehouse": warehouse or "",
+        "set_warehouse": warehouse or "",
+        "order_type": "Sales",
+        "is_pos": 0,
+        "is_subcontracted": 0,
+        "ignore_pricing_rule": cint(ignore_pricing_rule),
+        "transaction_type": "selling",
+    })
+
+    out = _get_item_details(args)
+
+    # Append custom_last_rate
+    last_rate = 0.0
+    if customer:
+        result_uom = out.get("uom") or uom or ""
+        lr = get_last_sales_rate(customer, item_code, result_uom)
+        last_rate = flt(lr)
+
+    out["custom_last_rate"] = last_rate
+
+    return out
+
+
+# ──────────────────────────────────────────────────────────
 #  PRINT INVOICE API
 # ──────────────────────────────────────────────────────────
 
@@ -757,6 +816,27 @@ def get_item_purchase_history(item_code, limit=5, start=0):
         "limit": cint(limit),
         "start": cint(start)
     }, as_dict=True)
+
+@frappe.whitelist()
+def get_item_stock_and_conversion(item_code, warehouse, uom=None):
+    """Return actual_qty from Bin and conversion_factor from UOM Conversion Detail."""
+    actual_qty = 0.0
+    conversion_factor = 1.0
+    
+    if item_code and warehouse:
+        bin_qty = frappe.db.get_value("Bin", {"item_code": item_code, "warehouse": warehouse}, "actual_qty")
+        if bin_qty is not None:
+            actual_qty = flt(bin_qty)
+            
+    if item_code and uom:
+        cf = frappe.db.get_value("UOM Conversion Detail", {"parent": item_code, "uom": uom}, "conversion_factor")
+        if cf is not None:
+            conversion_factor = flt(cf)
+            
+    return {
+        "actual_qty": actual_qty,
+        "conversion_factor": conversion_factor
+    }
 
 # ──────────────────────────────────────────────────────────
 #  INTERNAL HELPERS

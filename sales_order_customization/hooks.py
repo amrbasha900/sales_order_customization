@@ -24,7 +24,8 @@ fixtures = [
                 "Sales Order Item-custom_last_rate", "Sales Order Item-custom_action", "Company-custom_update_stock",
                  "Company-custom_sales_order_print_format_button", "Sales Order-custom_customer_balance",
                  "Company-custom_print_sales_order_matrix", "Company-custom_sales_order_return_print_format_button",
-                 "Company-custom_print_sales_order_return_matrix"
+                 "Company-custom_print_sales_order_return_matrix", "Sales Order Item-custom_available_qty_uom",
+                 "Purchase Order Item-custom_available_qty_uom"
             ]
         ]
     ]}
