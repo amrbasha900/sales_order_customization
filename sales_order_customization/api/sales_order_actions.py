@@ -993,7 +993,23 @@ def _parse_args(args):
         args = json.loads(args)
     return frappe._dict(args)
 
-from erpnext.selling.doctype.customer.customer import get_customer_outstanding
 @frappe.whitelist()  
-def get_customer_outstanding_amount(customer, company, ignore_outstanding_sales_order=False, cost_center=None):
-    return get_customer_outstanding(customer, company, ignore_outstanding_sales_order, cost_center)
+def get_customer_outstanding_amount(customer, company, cost_center=None):  
+    # Build condition for cost center filter  
+    cond = ""  
+    if cost_center:  
+        lft, rgt = frappe.get_cached_value("Cost Center", cost_center, ["lft", "rgt"])  
+        cond = f""" and cost_center in (select name from `tabCost Center` where  
+            lft >= {lft} and rgt <= {rgt})"""  
+      
+    # Get GL-based outstanding only  
+    outstanding_based_on_gle = frappe.db.sql(  
+        f"""  
+        select sum(debit) - sum(credit)  
+        from `tabGL Entry` where party_type = 'Customer'  
+        and is_cancelled = 0 and party = %s  
+        and company=%s {cond}""",  
+        (customer, company),  
+    )  
+      
+    return flt(outstanding_based_on_gle[0][0]) if outstanding_based_on_gle else 0
