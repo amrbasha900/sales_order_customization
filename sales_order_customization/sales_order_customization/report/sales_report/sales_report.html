@@ -1,0 +1,226 @@
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="pdfkit-page-size" content="A4">
+    <meta name="pdfkit-orientation" content="Portrait">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Amiri:ital,wght@0,400;0,700;1,400;1,700&family=Lateef:wght@200;300;400;500;600;700;800&family=Scheherazade+New:wght@400;500;600;700&family=Noto+Kufi+Arabic:wght@100..900&family=Cairo:wght@200..1000&display=swap"
+        rel="stylesheet">
+
+    <style>
+        .print-format {
+            direction: ltr;
+            margin-left: 5mm;
+            margin-right: 5mm;
+            font-family: inherit;
+        }
+
+        .filter-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+            border: 1px solid #d1d8dd;
+        }
+
+        .filter-table td {
+            background-color: #f8fafc;
+            padding: 8px 12px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #374151;
+            width: 50%;
+            border: 1px solid #e5e7eb;
+        }
+
+        .report-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 11px;
+            color: #374151;
+            margin-bottom: 30px;
+            border: 1px solid #e5e7eb;
+        }
+
+        .report-table th,
+        .report-table td {
+            text-align: left;
+            padding: 5px 6px;
+            vertical-align: top;
+            border: 1px solid #e5e7eb;
+        }
+
+        .report-table th {
+            color: #6b7280;
+            font-weight: bold;
+            border-bottom: 2px solid #374151;
+            font-size: 12px;
+            background-color: #ffffff;
+        }
+
+        .report-table tbody tr:nth-child(even) {
+            background-color: #f8fafc;
+        }
+
+        .report-table td div {
+            margin-bottom: 4px;
+        }
+    </style>
+</head>
+
+
+
+<br>
+
+{%
+var active_filters = [];
+if(filters.from_date) active_filters.push("Period From: " + filters.from_date);
+if(filters.to_date) active_filters.push("Period To: " + filters.to_date);
+if(filters.branch) active_filters.push("Branch: " + filters.branch);
+if(filters.customer) active_filters.push("Customer: " + filters.customer);
+if(filters.sales_person) active_filters.push("Salesperson: " + filters.sales_person);
+if(filters.payment_type) active_filters.push("Payment Type: " + filters.payment_type);
+if(filters.is_return) active_filters.push("Is Return: " + filters.is_return);
+%}
+
+<table class="filter-table">
+    {% for(var j=0; j<active_filters.length; j+=2) { %} <tr>
+        <td>{%= active_filters[j] %}</td>
+        <td>{%= active_filters[j+1] || '' %}</td>
+        </tr>
+        {% } %}
+</table>
+
+<table class="report-table">
+    <thead>
+        <tr>
+            <th>{%= (filters.is_return === "Yes") ? "Return" : "Invoice" %}</th>
+            <th>Salesperson</th>
+            <th>Date</th>
+            <th>Sale</th>
+            <th>Tax</th>
+            <th>Cash</th>
+            <th>Bank</th>
+            <th>Credit</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% var total_sales = 0,
+        total_return = 0,
+        total_tax = 0,
+        total_cash = 0,
+        total_bank = 0,
+        total_credit = 0;
+        %}
+
+        {% for(var i=0, l=data.length; i<l; i++) { %} {% if(data[i].name) { %} <tr>
+            <td>
+                <div style="font-size: 10px; color: #4b5563;">{%= (data[i].customer_name || "") %} - [{%=
+                    data[i].customer %}]</div>
+                <div style="font-weight: 500;">{%= data[i].name %}</div>
+            </td>
+            <td style="text-transform: uppercase;">{%= data[i].sales_person || "" %}</td>
+            <td>{%= data[i].posting_date %}</td>
+            <td>{%= format_currency(data[i].sales) %}</td>
+            <td>{%= format_currency(data[i].tax) %}</td>
+            <td>{%= format_currency(data[i].cash) %}</td>
+            <td>{%= format_currency(data[i].bank) %}</td>
+            <td>{%= format_currency(data[i].outstanding_amount) %}</td>
+            </tr>
+
+            {%
+            if(data[i].is_return) {
+            total_return += Math.abs(data[i].sales || 0);
+            } else {
+            total_sales += data[i].sales || 0;
+            }
+            %}
+            {% total_tax += data[i].tax || 0; %}
+            {% total_cash += data[i].cash || 0; %}
+            {% total_bank += data[i].bank || 0; %}
+            {% total_credit += data[i].outstanding_amount || 0; %}
+            {% } %}
+            {% } %}
+            {% var net_total = total_sales - total_return; %}
+    </tbody>
+</table>
+
+<style>
+    .summary-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+        color: #374151;
+        margin-top: 20px;
+    }
+
+    .summary-table td,
+    .summary-table th {
+        border: 1px solid #e5e7eb;
+        padding: 8px 12px;
+        text-align: left;
+    }
+
+    .summary-table th {
+        font-weight: 700;
+        color: #374151;
+        font-size: 14px;
+        background-color: #f9fafb;
+    }
+
+    .summary-table td:nth-child(1) {
+        font-weight: 600;
+        width: 30%;
+    }
+</style>
+
+<div style="page-break-inside: avoid;">
+    <table class="summary-table">
+        <thead>
+            <tr>
+                <th colspan="2">Report Summary</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Sales</td>
+                <td>{%= format_currency(total_sales) %}</td>
+            </tr>
+            <tr>
+                <td>Return</td>
+                <td>{%= format_currency(total_return) %}</td>
+            </tr>
+            <tr>
+                <td>Net Total</td>
+                <td>{%= format_currency(net_total) %}</td>
+            </tr>
+            <tr>
+                <td>Tax</td>
+                <td>{%= format_currency(total_tax) %}</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <table class="summary-table">
+        <thead>
+            <tr>
+                <th colspan="2">Balance Amount</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>Cash</td>
+                <td>{%= format_currency(total_cash) %}</td>
+            </tr>
+            <tr>
+                <td>Bank</td>
+                <td>{%= format_currency(total_bank) %}</td>
+            </tr>
+            <tr>
+                <td>Credit Sale</td>
+                <td>{%= format_currency(total_credit) %}</td>
+            </tr>
+        </tbody>
+    </table>
+</div>

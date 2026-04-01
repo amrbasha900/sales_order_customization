@@ -13,7 +13,15 @@ app_license = "mit"
 
 # doctype js
 doctype_js = {
-    "Sales Order": "public/js/sales_order_custom.js"
+    "Sales Order": [
+        "public/js/so_submit_pay.js",
+        "public/js/so_return.js",
+        "public/js/so_item_dashboard.js",
+        "public/js/so_quick_search.js",
+        "public/js/so_offline_sync.js",
+        "public/js/so_print.js",
+        "public/js/sales_order_custom.js",
+    ]
 }
 
 # Export Custom Fields
@@ -25,7 +33,7 @@ fixtures = [
                  "Company-custom_sales_order_print_format_button", "Sales Order-custom_customer_balance",
                  "Company-custom_print_sales_order_matrix", "Company-custom_sales_order_return_print_format_button",
                  "Company-custom_print_sales_order_return_matrix", "Sales Order Item-custom_available_qty_uom",
-                 "Purchase Order Item-custom_available_qty_uom"
+                 "Purchase Order Item-custom_available_qty_uom", "Sales Order Item-custom_valuation_rate_with_uom"
             ]
         ]
     ]}
